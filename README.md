@@ -1,95 +1,121 @@
-# AgentSentinel
+<p align="center">
+  <h1 align="center">AgentSentinel</h1>
+  <p align="center"><strong>Stop LLM agents from calling the wrong thing — before it leaves your process.</strong></p>
+</p>
 
-Zero-training, drop-in safety guardrails and observability for LLM agents.
-Block hallucinated tool calls, pause on missing info or missing approval, and
-keep an audit trail of every decision — with no model training, no GPU, and no
-framework lock-in.
+<p align="center">
+  <a href="https://www.python.org/"><img alt="Python 3.9+" src="https://img.shields.io/badge/Python-3.9%2B-blue"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
+  <a href="#"><img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-none-brightgreen.svg"></a>
+  <a href="#"><img alt="Pure stdlib" src="https://img.shields.io/badge/pure-stdlib-blueviolet.svg"></a>
+</p>
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Zero deps](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](pyproject.toml)
+**AgentSentinel** is a zero-training, zero-dependency guardrail that validates an
+agent's tool calls *before* they touch the outside world. One check in front of
+any agent — no model, no GPU, no framework lock-in.
 
-## Why this exists
+---
 
-As soon as an LLM is allowed to *call tools*, it starts making a specific class
-of mistakes that capability benchmarks never catch:
+## The problem
 
-- **Tool hallucination** — calling a tool that does not exist, or inventing a
+The moment an LLM is allowed to call tools, a new class of failure appears that
+capability benchmarks never measure:
+
+- **Tool hallucination** — the model invents a tool that doesn't exist, or a
   parameter the tool never had.
-- **Compliance bias** — proceeding to act even when key information or explicit
+- **Compliance bias** — it acts even when a required input or explicit
   permission is missing, because "just try it" is the rewarded default.
-- **Unchecked destructive actions** — the model writes `rm -rf` into a shell
-  call and nothing upstream notices.
+- **Unchecked destructive actions** — `rm -rf`, `DROP TABLE`, an unapproved
+  payment — and nothing upstream stops it.
 
-Recent research keeps landing on the same gap: the leading agent benchmarks
-spend almost nothing on safety, and the reliable fix is *not* a bigger model —
-it is a **closed-world check before the call goes out**. AgentSentinel turns
-that idea into a small, composable library you can slot in front of any agent.
+The fix is not a bigger model. It's a **closed-world check before the call
+leaves your process**. AgentSentinel is that check, packaged as a small library
+you can read top to bottom in ten minutes.
 
-## What it does
+## What you get
 
-`SafeStep` validates a proposed tool call and returns one of three verdicts:
+- **`SafeStep`** — validates every tool call against a registry and returns one
+  of three verdicts: `allow`, `deny`, or `abstain` (pause and ask, don't guess).
+- **Structured abstention** — every pause carries a `gap` that says *why*:
+  `specification` (missing info), `verification` (unconfirmed state), or
+  `authority` (no permission).
+- **`SafeDispatcher`** — runs the real function only after the guard approves.
+- **Adapters** — OpenAI-style function calling and LangChain tools, with no hard
+  dependency on either.
+- **`TrajectoryAuditor`** — locates the *first* mistake in a run across six
+  failure families, using structured signals and no model.
+- **Policy-as-config** — declare tools and rules in YAML or JSON.
 
-| Verdict  | Meaning                                                        | Example                                |
-|----------|----------------------------------------------------------------|----------------------------------------|
-| `allow`  | Call conforms to the registered schema.                        | `search_web({"query": "..."})`         |
-| `deny`   | Call is malformed or hallucinated — block it.                  | `send_email({})` when not registered   |
-| `abstain`| Well-formed, but should pause and ask first (don't guess).     | missing required arg, needs approval   |
+## Demo
 
-`abstain` carries a `gap` that says *why* it paused, using the three-gap
-taxonomy: `specification` (missing info), `verification` (can't confirm state),
-or `authority` (no permission granted). That structured reason is what lets a
-downstream layer turn a silent failure into an informed question.
+```python
+from agentsentinel import Policy, SafeStep, ToolCall, ToolDefinition, ToolRegistry
+
+registry = ToolRegistry([
+    ToolDefinition("search_web", parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "lang": {"type": "string", "enum": ["en", "zh"]},
+        },
+        "required": ["query"],
+    }),
+    ToolDefinition("run_shell", parameters={
+        "type": "object",
+        "properties": {"command": {"type": "string"}},
+        "required": ["command"],
+    }, requires_approval=True),
+])
+
+guard = SafeStep(registry)
+
+for call in [
+    ToolCall("search_web", {"query": "best agent papers", "lang": "zh"}),
+    ToolCall("search_web", {"lang": "en"}),
+    ToolCall("search_web", {"query": "hi", "lang": "de"}),
+    ToolCall("send_email", {}),
+    ToolCall("run_shell", {"command": "rm -rf /tmp/cache"}),
+]:
+    d = guard.check(call)
+    print(f"{call.name:<12} {d.verdict.value:<8} {d.reasons[0]}")
+```
+
+```
+search_web   allow    arguments conform to schema
+search_web   abstain  'search_web' is missing required arguments: query
+search_web   deny     'search_web' arguments do not match schema: 'lang' must be one of ['en', 'zh']
+send_email   deny     tool 'send_email' is not registered (hallucinated tool or typo)
+run_shell    abstain  'run_shell' matched sensitive pattern(s): rm\s+-rf
+```
+
+The destructive command was stopped **before it ran** — and the reason why is
+structured, so your agent (or your user) can ask the right follow-up instead of
+silently guessing.
 
 ## Quickstart
 
 ```bash
-pip install agentsentinel   # not yet on PyPI — clone and `pip install -e .` for now
+pip install agentsentinel          # or: git clone … && pip install -e .
 ```
 
 ```python
-from agentsentinel import (
-    Policy, SafeStep, ToolCall, ToolDefinition, ToolRegistry, TraceLogger,
-)
+from agentsentinel import SafeStep, ToolCall, ToolDefinition, ToolRegistry
 
-registry = ToolRegistry([
-    ToolDefinition(
-        name="search_web",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "lang": {"type": "string", "enum": ["en", "zh"]},
-            },
-            "required": ["query"],
-        },
-    ),
-    ToolDefinition(
-        name="run_shell",
-        parameters={"type": "object",
-                    "properties": {"command": {"type": "string"}},
-                    "required": ["command"]},
-        requires_approval=True,
-    ),
-])
+guard = SafeStep(ToolRegistry([
+    ToolDefinition("search", parameters={
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    }),
+]))
 
-guard = SafeStep(registry)
-log = TraceLogger()
-
-for call in [
-    ToolCall("search_web", {"query": "agent papers", "lang": "zh"}),  # allow
-    ToolCall("search_web", {"lang": "en"}),                           # abstain (missing query)
-    ToolCall("search_web", {"query": "hi", "lang": "de"}),            # deny (bad enum)
-    ToolCall("send_email", {}),                                       # deny (unknown tool)
-    ToolCall("run_shell", {"command": "rm -rf /tmp/cache"}),          # abstain (sensitive)
-]:
-    decision = guard.check(call)
-    log.record(call, decision)
-    print(call.name, "->", decision.verdict.value, "|", decision.reasons[0])
+decision = guard.check(ToolCall("search", {"query": "hello"}))
+print(decision.verdict.value)   # allow
 ```
 
 Dangerous patterns (`rm -rf`, `DROP TABLE`, `DELETE FROM`, …) are **on by
-default**. Grant approval for a tool with `guard.policy.approve("run_shell")`.
+default**. Grant approval for a specific tool with
+`guard.policy.approve("run_shell")`.
 
 ## How it works
 
@@ -98,7 +124,7 @@ LLM proposes ToolCall
         │
         ▼
 ┌─────────────────────────────┐
-│ 1. tool in registry?        │──no──▶ deny (tool hallucination)
+│ 1. tool in registry?        │──no──▶ deny   (tool hallucination)
 └─────────────────────────────┘
         │ yes
         ▼
@@ -108,7 +134,7 @@ LLM proposes ToolCall
         │ yes
         ▼
 ┌─────────────────────────────┐
-│ 3. args match schema?       │──no──▶ deny (unknown param / bad type)
+│ 3. args match schema?       │──no──▶ deny   (unknown param / bad type)
 └─────────────────────────────┘
         │ yes
         ▼
@@ -120,85 +146,73 @@ LLM proposes ToolCall
       allow
 ```
 
-The validator is deliberately small: `type`, `required`, `enum`, and unknown-key
-detection. That covers the failure modes that actually bite in production while
-staying predictable and auditable.
+| Verdict   | Meaning                                                    | Example                              |
+|-----------|------------------------------------------------------------|--------------------------------------|
+| `allow`   | Call conforms to the registered schema.                    | `search({"query": "..."})`           |
+| `deny`    | Call is malformed or hallucinated — block it.              | unregistered tool, unknown parameter |
+| `abstain` | Well-formed, but pause and ask first — don't guess.        | missing arg, sensitive action        |
 
-## OpenAI adapter
+The validator is deliberately small — `type`, `required`, `enum`, and
+unknown-key detection — which covers the failure modes that actually bite in
+production while staying predictable and auditable.
 
-`agentsentinel.adapters` bridges OpenAI-style function calling to the guard:
+## Integrations
+
+**OpenAI / function calling** — parse raw tool calls and dispatch safely:
 
 ```python
-from agentsentinel import SafeStep, ToolCall, ToolRegistry
+from agentsentinel import SafeStep, ToolRegistry
 from agentsentinel.adapters import SafeDispatcher, openai_tools, to_tool_call
 
 registry = ToolRegistry([...])
 guard = SafeStep(registry)
 
-# 1. send these to the model so it only ever sees known tools
-tools = openai_tools(registry)
+tools = openai_tools(registry)        # send to the model — it only sees known tools
+result = SafeDispatcher(registry, guard, functions={"run_shell": my_shell_fn}) \
+    .dispatch(to_tool_call(raw_tool_call))
 
-# 2. after the model replies, convert its raw tool call and dispatch safely
-raw = {"name": "run_shell", "arguments": '{"command": "ls"}'}   # or an SDK object
-dispatcher = SafeDispatcher(registry, guard, functions={"run_shell": my_shell_fn})
-
-result = dispatcher.dispatch(to_tool_call(raw))
 if result.blocked:
-    print(result.decision.reasons)   # tell the model why it was paused
-else:
-    print(result.result)
+    print(result.decision.reasons)    # tell the model why it was paused
 ```
 
-`SafeDispatcher` runs the registered function only when the guard allows the
-call — blocked or abstained calls never touch the real function.
-
-## LangChain adapter
-
-The same guard works with LangChain tools — with **no hard dependency** on
-LangChain. `from_langchain_tool` and `langchain_tool_call` read a tool's
-`name` / `description` / `args_schema` (or `args`) by duck typing, so they run
-without installing anything:
+**LangChain** — duck-typed conversion with no hard dependency:
 
 ```python
 from agentsentinel.adapters import from_langchain_tool, langchain_tool_call
 
-tool_def = from_langchain_tool(my_langchain_tool)      # -> ToolDefinition
+tool = from_langchain_tool(my_langchain_tool)          # -> ToolDefinition
 call = langchain_tool_call(ai_message.tool_calls[0])   # -> ToolCall (handles "args")
 ```
 
-`to_langchain_tools(registry, functions)` builds LangChain `Tool` objects when
-`langchain-core` is installed (it raises a clear hint if not).
+## Failure localization
 
-## Trajectory auditor
-
-`TrajectoryAuditor` answers the question operators actually ask: *where did
-this run first go wrong?* It classifies each step into the six production
-failure families — `drift`, `state`, `coordination`, `termination`,
-`adversarial`, `tool_interface` — using only structured signals (guardrail
-verdicts, execution errors, failed observations, repeated calls), no model and
-no training:
+`TrajectoryAuditor` answers the question operators actually ask: *where did this
+run first go wrong?* It classifies each step into six failure families — `drift`,
+`state`, `coordination`, `termination`, `adversarial`, `tool_interface` — using
+only structured signals (guardrail verdicts, execution errors, failed
+observations, repeated calls), no model and no training:
 
 ```python
-from agentsentinel import Decision, Step, TrajectoryAuditor, Verdict
+from agentsentinel import Decision, GapKind, Step, TrajectoryAuditor, Verdict
 
 steps = [
     Step(0, "search", observation="ok"),
     Step(1, "run_shell", arguments={"command": "rm -rf /x"},
-         decision=Decision(Verdict.ABSTAIN, gaps=["authority"])),
+         decision=Decision(Verdict.ABSTAIN, gaps=[GapKind.AUTHORITY])),
 ]
 
 first = TrajectoryAuditor().first_failure(steps)
 print(first.category.value, "->", first.mode)   # adversarial -> unauthorized_action
 ```
 
-This is the deterministic cousin of the learned "failure localizer" in the
-research — cheap to run on every trajectory today, and a clean foundation to
-swap in a trained verifier later.
+Recent research shows frontier LLM judges struggle to locate the *first* mistake
+in a long agent run; structured signals recover it cheaply and deterministically
+today — and leave a clean interface to swap in a trained verifier later.
 
 ## Policy as config
 
-Declare tools and rules in a YAML or JSON file instead of code. YAML needs
-PyYAML; JSON works with no extra dependency.
+Declare tools and rules in YAML or JSON instead of code. YAML needs PyYAML;
+JSON works with no extra dependency.
 
 ```yaml
 # policy.yaml
@@ -226,11 +240,20 @@ from agentsentinel import load_config_file
 
 cfg = load_config_file("policy.yaml")
 cfg.guard.check(...)          # ready to use
-cfg.registry, cfg.policy      # or reach into the parts
 ```
 
 Config builds on the safe defaults: dangerous patterns stay on, and your
 `denylist` / `approved_tools` / `sensitive_patterns` are merged on top.
+
+## Why AgentSentinel
+
+- **Not a prompt.** Prompts can be talked out of. A registry check cannot.
+- **Not a heavyweight framework.** No server, no model in the loop, no YAML
+  sprawl. The core is a few hundred lines of stdlib you can audit.
+- **Closed-world by default.** Anything not registered doesn't run.
+- **Deterministic and observable.** Every decision is reproducible and logged,
+  so a "no" always has a reason.
+- **Sits in front of any agent.** Framework-agnostic by design.
 
 ## Project layout
 
@@ -242,7 +265,7 @@ agentsentinel/
 │   ├── policy.py         # denylist, approvals, sensitive patterns
 │   ├── guard.py          # SafeStep — the check pipeline
 │   ├── config.py         # load_config / load_config_file (YAML or JSON)
-│   ├── taxonomy.py       # six failure families + descriptions
+│   ├── taxonomy.py       # six failure families
 │   ├── auditor.py        # TrajectoryAuditor — first-mistake locator
 │   ├── observability.py  # TraceLogger — audit trail
 │   └── adapters/         # openai.py, langchain.py
@@ -252,13 +275,17 @@ agentsentinel/
 
 ## Roadmap
 
-- [x] `SafeStep` closed-world validation + abstention (v0.1)
-- [x] OpenAI adapter — parse tool calls, build `tools` array, guarded dispatch
-- [x] LangChain adapter — duck-typed tool/call conversion, optional `langchain-core`
-- [x] Failure taxonomy + deterministic first-mistake locator (`TrajectoryAuditor`)
+- [x] `SafeStep` closed-world validation + abstention
+- [x] OpenAI and LangChain adapters
+- [x] Failure taxonomy + deterministic first-mistake locator
 - [x] Policy-as-config (YAML / JSON)
 - [ ] Per-user approval flows (interactive pause-and-ask)
 - [ ] Learned trajectory verifier (trained to locate the first mistake)
+
+## Contributing
+
+Issues and PRs welcome. The library is intentionally small and dependency-free —
+keep it that way unless there's a strong reason.
 
 ## License
 
