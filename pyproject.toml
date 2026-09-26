@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentsentinel"
+version = "0.1.0"
+description = "Drop-in, zero-training safety guardrails and observability for LLM agents."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "AgentSentinel contributors" }]
+keywords = ["llm", "agent", "safety", "guardrails", "tool-calling", "observability"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/agentsentinel/agentsentinel"
+
+[tool.setuptools.packages.find]
+include = ["agentsentinel*"]
